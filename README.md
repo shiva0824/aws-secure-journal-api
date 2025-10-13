@@ -1,67 +1,258 @@
-# AWS Journal API Deployment
+# AWS Secure Journal API Deployment
 
-This project is part of the **Learn to Cloud (L2C) Guide - [Cloud Deployment](https://learntocloud.guide/phase3/deploy-api)**.
+A simple journal application deployed on AWS as part of the **Learn to Cloud (L2C) Guide - [Cloud Deployment](https://learntocloud.guide/phase3/deploy-api)**.
 
-The goal was to get a small **FastAPI** app running on AWS, connected to a **PostgreSQL** database, and make sure everything runs securely in the cloud.
+This repository contains the **FastAPI backend** for storing and managing journal entries in a **PostgreSQL database** hosted on a private EC2 instance.
 
-I wanted this to feel close to a real production setup but still simple enough to understand and manage on my own. I’ll be writing a more detailed post about the design, screenshots of API testing, issues I ran into, and lessons learned soon on **[LinkedIn](#)** (link coming later).
+The deployment follows AWS best practices with a secure VPC, public/private subnets, IAM roles, SSM access, and automated database backups.
 
----
-
-## Project Overview
-
-This setup uses a basic two-tier design:
-
-- **Application Layer (Public Subnet):** Runs the FastAPI app behind Nginx.
-- **Database Layer (Private Subnet):** Runs PostgreSQL on a private EC2 instance that only the app server can reach.
+I’ll be writing a more detailed post about the design, screenshots of API testing, issues I ran into, and lessons learned soon on **[LinkedIn](#)** (link coming later).
 
 ---
 
-## Deployment Summary
+## 1. Infrastructure Setup (AWS Console)
 
-### 1. Network Setup
+### VPC and Networking
 
-- Started by creating a VPC using Class C network design (192.168.0.0/24) range and divided it into four subnets.
-- One subnet is public (for the FastAPI server) and one is private (for PostgreSQL). The remaining two are reserved for future use.
-- Attached an Internet Gateway for public access and a NAT Gateway for secure outbound traffic from the private subnet.
-- Then configured route tables and assigned an Elastic IP to the public instance.
+- Create a new **VPC** (Note: Plan your CIDR blocks accordingly)
+- Add:
+  - **Public Subnet** (for API EC2)
+  - **Private Subnet** (for DB EC2)
+- Configure **Route Tables**:
+- Create and attach an **Internet Gateway**.
+- Create a **NAT Gateway** in the public subnet for private instance outbound access.
+- Allocate and associate an **Elastic IP** (used by NAT and API EC2).
 
-This part was the trickiest because small mistakes in subnet or route settings can break connectivity. Once it worked, everything else got smoother.
+### Security Groups
 
----
-
-### 2. API Server (Public Subnet)
-
-The API server runs on an Ubuntu EC2 instance.
-
-- Installed **Nginx** to forward web traffic from port 80 to the FastAPI app running on port 8000.
-- The app runs with **uvicorn** and is managed by **systemd** so it starts automatically on reboot.
-- Environment variables (like DB credentials) are stored in a `.env` file, and I tested all endpoints using Swagger UI (`/docs`).
-  Once everything worked, hardened the firewall rules to allow only HTTP and internal DB connections.
+- **journal-api-sg**: Allow inbound HTTP (80) from anywhere; SSH (22) from your IP only and outbound to anywhere.
+- **journal-db-sg**: Allow inbound PostgreSQL (5432) from `journal-api-sg` only; outbound to anywhere.
 
 ---
 
-### 3. Database Server (Private Subnet)
+## 2. Deploy and Configure the API Server
 
-The database runs on another EC2 instance that has no public IP.
+### Launch EC2 (Public Subnet)
 
-- It hosts a **PostgreSQL** database named `career_journal` with a dedicated user `journal_user`.
-- Modified `postgresql.conf` and `pg_hba.conf` to accept only connections from the app server’s private IP.
-  After that, the app could talk to the DB internally — no need for public access, which keeps things safer.
+- Launch Ubuntu instance in the public subnet.
+- Assign the **Elastic IP**.
+- Attach security group: `journal-api-sg`.
+- SSH into instance and install dependencies:
 
----
+```bash
+sudo apt update -y
+sudo apt install -y python3 python3-venv git nginx
+```
 
-## Security and Access
+### Clone and Run Application
 
-The private PostgreSQL server is managed through **AWS Systems Manager (SSM)**.
-That means I don’t need SSH keys or a public IP to connect — I can just use SSM Session Manager from the AWS console for secure shell access.
+```bash
+git clone https://github.com/<your-username>/aws-secure-journal-api.git
+cd aws-secure-journal-api/api
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
-The DB instance also has an IAM role with the **AmazonSSMManagedInstanceCore** policy.
-It can reach the internet safely through the NAT Gateway whenever it needs to install updates or send backups to S3.
+### Configure Environment
 
-This setup keeps the instance locked down but still manageable and up-to-date.
+**Create a .env file:**
 
----
+```bash
+sudo nano .env
+```
+
+Add:
+
+```bash
+POSTGRES_USER=journal_user
+POSTGRES_PASSWORD=yourpassword
+POSTGRES_DB=career_journal
+DATABASE_URL=postgresql://journal_user:yourpassword@<private-db-ip>:5432/career_journal
+```
+
+**Test Locally:**
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Visit: `http://Your-Elastic-IP/docs`
+
+### Nginx Reverse Proxy + Systemd
+
+**Configure Nginx:**
+
+```
+sudo nano /etc/nginx/conf.d/fastapi.conf
+```
+
+Add:
+
+```
+server {
+listen 80;
+server_name <Elastic-IP>;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+}
+```
+
+Test and reload Nginx:
+
+```
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+**Create systemd service:**
+
+```
+sudo nano /etc/systemd/system/fastapi.service
+```
+
+Add:
+
+```
+[Unit]
+Description=FastAPI Application
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/aws-secure-journal-api/api
+Environment="PATH=/home/ubuntu/aws-secure-journal-api/api/venv/bin"
+ExecStart=/home/ubuntu/aws-secure-journal-api/api/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```
+sudo systemctl daemon-reload
+sudo systemctl enable fastapi
+sudo systemctl start fastapi
+sudo systemctl status fastapi
+```
+
+## 3. Deploy and Configure the Database Server
+
+### Launch EC2 (Private Subnet)
+
+- Launch Ubuntu instance in private subnet (no public IP).
+- Attach security group: `journal-db-sg`.
+- Attach IAM role: `journal-postgres-role` with:
+  - AmazonSSMManagedInstanceCore
+  - S3 access policy for backups.
+
+Connect using Session Manager.
+
+Install PostgreSQL:
+
+```bash
+sudo apt update -y
+sudo apt install -y postgresql postgresql-contrib
+```
+
+Create DB and user:
+
+```bash
+sudo -u postgres psql
+CREATE USER journal_user WITH PASSWORD 'yourpassword';
+CREATE DATABASE career_journal OWNER journal_user;
+ALTER ROLE journal_user WITH LOGIN;
+\q
+```
+
+Edit configuration files:
+
+```bash
+sudo nano /etc/postgresql/*/main/postgresql.conf
+# Listen on all interfaces
+listen_addresses = '*'
+
+sudo nano /etc/postgresql/*/main/pg_hba.conf
+# Allow connections from API subnet
+host all journal_user <API_SUBNET_CIDR> scram-sha-256
+```
+
+Restart PostgreSQL:
+
+```
+sudo systemctl restart postgresql
+```
+
+Test Connection (from API EC2)
+
+```
+psql -h <private-db-ip> -U journal_user -d career_journal
+```
+
+Create table schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS entries (
+id VARCHAR PRIMARY KEY,
+data JSONB NOT NULL,
+created_at TIMESTAMPTZ NOT NULL,
+updated_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entries_created_at ON entries(created_at);
+CREATE INDEX IF NOT EXISTS idx_entries_data_gin ON entries USING GIN (data);
+```
+
+## 4. Database Backup Automation (Cron + S3)
+
+**Create backup script:**
+
+```bash
+sudo nano /usr/local/bin/pg_backup.sh
+```
+
+Add:
+
+```
+#!/bin/bash
+BACKUP*DIR="/var/backups/postgres"
+DATE=$(date +%Y-%m-%d*%H-%M)
+DB_NAME="career_journal"
+USER="journal_user"
+BUCKET="journal-db-backups"
+
+sudo -u postgres pg_dump -Fc -d $DB_NAME > "$BACKUP_DIR/${DB_NAME}*$DATE.dump"
+gzip "$BACKUP_DIR/${DB_NAME}*$DATE.dump"
+aws s3 cp "$BACKUP_DIR/${DB_NAME}*$DATE.dump.gz" s3://$BUCKET/
+```
+
+Make executable:
+
+```
+sudo chmod +x /usr/local/bin/pg_backup.sh
+```
+
+Test:
+
+```
+sudo /usr/local/bin/pg_backup.sh
+aws s3 ls s3://journal-db-backups/
+```
+
+Add daily cron job:
+
+```
+sudo crontab -e
+0 2 \* \* \* /usr/local/bin/pg_backup.sh >> /var/log/pg_backup.log 2>&1
+
+```
 
 ## Architecture Summary
 
