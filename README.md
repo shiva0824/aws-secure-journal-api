@@ -6,7 +6,7 @@ This repository contains the **FastAPI backend** for storing and managing journa
 
 The deployment follows AWS best practices with a secure VPC, public/private subnets, IAM roles, SSM access, and automated database backups.
 
-I’ll be writing a more detailed post about the design, screenshots of API testing, issues I ran into, and lessons learned soon on **[LinkedIn](#)** (link coming later).
+Wrote a short article walking through my setup, security design, challenges, and what I learned along the way.....check it out [here](https://www.linkedin.com/pulse/deploying-secure-journal-api-aws-what-i-learned-govindagari-rcvsc)
 
 ---
 
