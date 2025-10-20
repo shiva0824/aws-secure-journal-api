@@ -10,6 +10,10 @@ I’ll be writing a more detailed post about the design, screenshots of API test
 
 ---
 
+## Architecture Diagram
+
+## ![Architecture Diagram](Architecture.png)
+
 ## 1. Infrastructure Setup (AWS Console)
 
 ### VPC and Networking
